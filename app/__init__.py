@@ -10,23 +10,28 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from flask import Flask
 import json
-import logging.config
+import logging
 import os
-import sys
 from stem import Signal
 import threading
 import warnings
 
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+from app.graceful import graceful, RequestTracker
+from app.logging_config import configure_logging
 from app.services.http_client import HttpxClient
 from app.services.provider import close_all_clients
 from app.version import __version__
+
+configure_logging()
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__, static_folder=os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'static'))
 
 app.wsgi_app = ProxyFix(app.wsgi_app)
+app.wsgi_app = RequestTracker(app.wsgi_app, graceful)
 
 # look for WHOOGLE_ENV, else look in parent directory
 dot_env_path = os.getenv(
@@ -118,7 +123,7 @@ try:
 except Exception as e:
     # If UA pool loading fails, log warning and set empty pool
     # The gen_user_agent function will handle the fallback
-    print(f"Warning: Could not initialize UA pool: {e}")
+    logger.warning('could not initialize UA pool: %s', e)
     app.config['UA_POOL'] = []
 
 # Session values - Secret key management
@@ -141,7 +146,9 @@ def get_secret_key():
         if len(env_key) >= 32:
             return env_key
         else:
-            print(f"Warning: WHOOGLE_SECRET_KEY too short ({len(env_key)} chars, need 32+). Using file/generated key instead.", file=sys.stderr)
+            logger.warning(
+                'WHOOGLE_SECRET_KEY too short (%d chars, need 32+), '
+                'using file/generated key instead', len(env_key))
     
     # Check file-based key
     app_key_path = os.path.join(app.config['CONFIG_PATH'], 'whoogle.key')
@@ -153,9 +160,9 @@ def get_secret_key():
                 if len(key) >= 32:
                     return key
                 else:
-                    print(f"Warning: Key file too short, regenerating", file=sys.stderr)
+                    logger.warning('key file too short, regenerating')
         except (PermissionError, IOError) as e:
-            print(f"Warning: Could not read key file: {e}", file=sys.stderr)
+            logger.warning('could not read key file: %s', e)
     
     # Generate new key
     new_key = str(b64encode(os.urandom(32)))
@@ -163,7 +170,9 @@ def get_secret_key():
         with open(app_key_path, 'w', encoding='utf-8') as key_file:
             key_file.write(new_key)
     except (PermissionError, IOError) as e:
-        print(f"Warning: Could not save key file: {e}. Key will not persist across restarts.", file=sys.stderr)
+        logger.warning(
+            'could not save key file: %s; key will not persist across '
+            'restarts', e)
     
     return new_key
 
@@ -297,9 +306,3 @@ from app import routes  # noqa
 # it's already being loaded
 if not generating_bangs:
     load_all_bangs(app.config['BANG_FILE'])
-
-# Disable logging from imported modules
-logging.config.dictConfig({
-    'version': 1,
-    'disable_existing_loggers': True,
-})

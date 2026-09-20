@@ -2,18 +2,20 @@ import argparse
 import base64
 import io
 import json
+import logging
 import os
 import re
+import threading
+import time
 import urllib.parse as urlparse
 import uuid
 import validators
-import sys
-import traceback
 from datetime import datetime, timedelta
 from functools import wraps
 
 import waitress
 from app import app
+from app.graceful import graceful
 from app.models.config import Config
 from app.models.endpoint import Endpoint
 from app.request import Request, TorError
@@ -36,6 +38,8 @@ import httpx
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.exceptions import InvalidSignature
 from werkzeug.datastructures import MultiDict
+
+logger = logging.getLogger(__name__)
 
 ac_var = 'WHOOGLE_AUTOCOMPLETE'
 autocomplete_enabled = os.getenv(ac_var, '1')
@@ -196,13 +200,66 @@ def after_request_func(resp):
 
 @app.errorhandler(404)
 def unknown_page(e):
-    app.logger.warning(e)
+    logger.warning(str(e))
     return redirect(g.app_location)
+
+
+_health_cache = {'checked_at': 0.0, 'healthy': False, 'checks': {}}
+_health_cache_lock = threading.Lock()
+
+GOOGLE_PROBE_URL = 'https://www.google.com/generate_204'
+HEALTH_CHECK_TTL_SECONDS = 10
+
+
+def _check_google_connectivity():
+    try:
+        with httpx.Client(timeout=5.0, follow_redirects=True) as client:
+            resp = client.get(GOOGLE_PROBE_URL)
+        return resp.status_code in (200, 204)
+    except httpx.HTTPError as e:
+        logger.warning('google connectivity check failed: %s', e)
+        return False
+
+
+def _check_config_directory():
+    config_path = app.config.get('CONFIG_PATH', '')
+    if not config_path:
+        return False
+    try:
+        return os.path.isdir(config_path) and os.access(
+            config_path, os.R_OK | os.W_OK)
+    except OSError as e:
+        logger.warning('config directory check failed: %s', e)
+        return False
 
 
 @app.route(f'/{Endpoint.healthz}', methods=['GET'])
 def healthz():
-    return ''
+    with _health_cache_lock:
+        stale = time.monotonic() - _health_cache[
+            'checked_at'] > HEALTH_CHECK_TTL_SECONDS
+        if stale:
+            _health_cache['checks'] = {
+                'google': _check_google_connectivity(),
+                'config_dir': _check_config_directory(),
+            }
+            _health_cache['healthy'] = all(_health_cache['checks'].values())
+            _health_cache['checked_at'] = time.monotonic()
+        checks = dict(_health_cache['checks'])
+        healthy = _health_cache['healthy']
+
+    if graceful.shutting_down:
+        healthy = False
+        checks['shutting_down'] = True
+
+    body = json.dumps({
+        'status': 'ok' if healthy else 'unhealthy',
+        'checks': checks,
+    })
+    response = make_response(body, 200 if healthy else 503)
+    response.headers['Content-Type'] = 'application/json'
+    response.headers['Cache-Control'] = 'no-store'
+    return response
 
 
 @app.route('/', methods=['GET'])
@@ -408,7 +465,7 @@ def search():
 
     # Return 503 if temporarily blocked by captcha
     if has_captcha(str(response)):
-        app.logger.error('503 (CAPTCHA)')
+        logger.error('503 (CAPTCHA)')
         fallback_engine = os.environ.get('WHOOGLE_FALLBACK_ENGINE_URL', '')
         if (fallback_engine):
             if wants_json:
@@ -666,7 +723,8 @@ def config():
                 # Keep both the selection and the custom string
                 if 'custom_user_agent' in config_data:
                     config_data['custom_user_agent'] = config_data['custom_user_agent']
-                    app.logger.debug(f"Setting custom user agent to: {config_data['custom_user_agent']}")
+                    logger.debug('Setting custom user agent to: %s',
+                                 config_data['custom_user_agent'])
             else:
                 config_data['use_custom_user_agent'] = False
                 # Only clear custom_user_agent if not using custom option
@@ -845,7 +903,7 @@ def internal_error(e):
     except Exception:
         pass
 
-    print(traceback.format_exc(), file=sys.stderr)
+    logger.exception('unhandled error while processing request')
 
     fallback_engine = os.environ.get('WHOOGLE_FALLBACK_ENGINE_URL', '')
     if (fallback_engine):
@@ -947,9 +1005,12 @@ def run_app() -> None:
     if args.debug:
         app.run(host=args.host, port=args.port, debug=args.debug)
     elif args.unix_socket:
-        waitress.serve(app, unix_socket=args.unix_socket, unix_socket_perms=args.unix_socket_perms)
+        graceful.serve(lambda: waitress.create_server(
+            app,
+            unix_socket=args.unix_socket,
+            unix_socket_perms=args.unix_socket_perms))
     else:
-        waitress.serve(
+        graceful.serve(lambda: waitress.create_server(
             app,
             listen="{}:{}".format(args.host, args.port),
-            url_prefix=os.environ.get('WHOOGLE_URL_PREFIX', ''))
+            url_prefix=os.environ.get('WHOOGLE_URL_PREFIX', '')))

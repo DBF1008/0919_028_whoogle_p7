@@ -4,6 +4,7 @@ from app.services.provider import get_http_client
 from app.utils.ua_generator import load_ua_pool, get_random_ua, DEFAULT_FALLBACK_UA
 from defusedxml import ElementTree as ET
 import httpx
+import logging
 import urllib.parse as urlparse
 import os
 from stem import Signal, SocketError
@@ -14,6 +15,8 @@ from stem.connection import authenticate_cookie, authenticate_password
 MAPS_URL = 'https://maps.google.com/maps'
 AUTOCOMPLETE_URL = ('https://suggestqueries.google.com/'
                     'complete/search?client=toolbar&')
+
+logger = logging.getLogger(__name__)
 
 # Valid query params
 VALID_PARAMS = ['tbs', 'tbm', 'start', 'near', 'source', 'nfpr']
@@ -59,11 +62,13 @@ def send_tor_signal(signal: Signal) -> bool:
                 authenticate_cookie(c, cookie_path=cookie_path)
             c.signal(signal)
             os.environ['TOR_AVAILABLE'] = '1'
+            logger.debug('Tor control connection available')
             return True
     except (SocketError, AuthenticationFailure,
             ConnectionRefusedError, ConnectionError):
         # TODO: Handle Tor authentication (password and cookie)
         os.environ['TOR_AVAILABLE'] = '0'
+        logger.info('Tor unavailable, continuing without Tor')
 
     return False
 
