@@ -7,8 +7,6 @@ import re
 import urllib.parse as urlparse
 import uuid
 import validators
-import sys
-import traceback
 from datetime import datetime, timedelta
 from functools import wraps
 
@@ -18,6 +16,7 @@ from app.models.config import Config
 from app.models.endpoint import Endpoint
 from app.request import Request, TorError
 from app.services.cse_client import CSEException
+from app.shutdown import shutdown_manager
 from app.utils.bangs import suggest_bang, resolve_bang
 from app.utils.misc import empty_gif, placeholder_img, get_proxy_host_url, \
     fetch_favicon
@@ -202,7 +201,44 @@ def unknown_page(e):
 
 @app.route(f'/{Endpoint.healthz}', methods=['GET'])
 def healthz():
-    return ''
+    checks = {
+        'google_connectivity': _check_google_connectivity(),
+        'config_dir': _check_config_dir(),
+    }
+    healthy = all(checks.values())
+    return jsonify(
+        status='ok' if healthy else 'error',
+        checks=checks,
+    ), 200 if healthy else 503
+
+
+def _check_google_connectivity() -> bool:
+    """Checks outbound connectivity to Google.
+
+    Returns True if Google responds to a lightweight request, False on any
+    connection/timeout error.
+    """
+    try:
+        timeout = float(os.getenv('WHOOGLE_HEALTHCHECK_TIMEOUT', '3'))
+    except ValueError:
+        timeout = 3.0
+    try:
+        # generate_204 is Google's lightweight connectivity check endpoint
+        httpx.head('https://www.google.com/generate_204',
+                   timeout=timeout,
+                   follow_redirects=False)
+        return True
+    except httpx.HTTPError as e:
+        app.logger.warning('Health check: Google unreachable: %s', e)
+        return False
+
+
+def _check_config_dir() -> bool:
+    """Checks that the config directory exists and is readable/writable."""
+    config_path = app.config.get('CONFIG_PATH', '')
+    return bool(config_path) \
+        and os.path.isdir(config_path) \
+        and os.access(config_path, os.R_OK | os.W_OK)
 
 
 @app.route('/', methods=['GET'])
@@ -845,7 +881,7 @@ def internal_error(e):
     except Exception:
         pass
 
-    print(traceback.format_exc(), file=sys.stderr)
+    app.logger.exception('Unhandled exception during request: %s', e)
 
     fallback_engine = os.environ.get('WHOOGLE_FALLBACK_ENGINE_URL', '')
     if (fallback_engine):
@@ -874,6 +910,10 @@ def internal_error(e):
 
 
 def run_app() -> None:
+    # Ensure SIGTERM/SIGINT trigger a graceful shutdown (idempotent, main
+    # thread only) so the console-script entry point is covered as well
+    shutdown_manager.install_signal_handlers()
+
     parser = argparse.ArgumentParser(
         description='Whoogle Search console runner')
     parser.add_argument(
@@ -947,9 +987,16 @@ def run_app() -> None:
     if args.debug:
         app.run(host=args.host, port=args.port, debug=args.debug)
     elif args.unix_socket:
-        waitress.serve(app, unix_socket=args.unix_socket, unix_socket_perms=args.unix_socket_perms)
+        server = waitress.create_server(
+            app,
+            unix_socket=args.unix_socket,
+            unix_socket_perms=args.unix_socket_perms)
+        shutdown_manager.register_server(server)
+        server.run()
     else:
-        waitress.serve(
+        server = waitress.create_server(
             app,
             listen="{}:{}".format(args.host, args.port),
             url_prefix=os.environ.get('WHOOGLE_URL_PREFIX', ''))
+        shutdown_manager.register_server(server)
+        server.run()

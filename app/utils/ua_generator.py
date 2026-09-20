@@ -6,10 +6,13 @@ found in working UA strings that successfully bypass Google's restrictions.
 """
 
 import json
+import logging
 import os
 import random
 from datetime import datetime
 from typing import List
+
+logger = logging.getLogger(__name__)
 
 # Default fallback UA if generation fails
 DEFAULT_FALLBACK_UA = "Opera/12.02 (Android 4.1; Linux; Opera Mobi/ADR-1111101157; U; en-US) Presto/2.9.201 Version/12.02"
@@ -170,7 +173,9 @@ def load_ua_pool(cache_path: str, count: int = 10) -> List[str]:
         if custom_uas:
             return custom_uas
         else:
-            print(f"Warning: Custom UA list file '{custom_ua_file}' not found or invalid, falling back to auto-generated UAs")
+            logger.warning(
+                "Custom UA list file '%s' not found or invalid, falling "
+                'back to auto-generated UAs', custom_ua_file)
 
     use_cache = os.environ.get('WHOOGLE_UA_CACHE_PERSISTENT', '1') == '1'
     refresh_days = int(os.environ.get('WHOOGLE_UA_CACHE_REFRESH_DAYS', '0'))

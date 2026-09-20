@@ -4,12 +4,15 @@ from app.services.provider import get_http_client
 from app.utils.ua_generator import load_ua_pool, get_random_ua, DEFAULT_FALLBACK_UA
 from defusedxml import ElementTree as ET
 import httpx
+import logging
 import urllib.parse as urlparse
 import os
 from stem import Signal, SocketError
 from stem.connection import AuthenticationFailure
 from stem.control import Controller
 from stem.connection import authenticate_cookie, authenticate_password
+
+logger = logging.getLogger(__name__)
 
 MAPS_URL = 'https://maps.google.com/maps'
 AUTOCOMPLETE_URL = ('https://suggestqueries.google.com/'
@@ -59,11 +62,14 @@ def send_tor_signal(signal: Signal) -> bool:
                 authenticate_cookie(c, cookie_path=cookie_path)
             c.signal(signal)
             os.environ['TOR_AVAILABLE'] = '1'
+            logger.info('Tor control connection available (signal=%s)',
+                        signal)
             return True
     except (SocketError, AuthenticationFailure,
-            ConnectionRefusedError, ConnectionError):
+            ConnectionRefusedError, ConnectionError) as e:
         # TODO: Handle Tor authentication (password and cookie)
         os.environ['TOR_AVAILABLE'] = '0'
+        logger.debug('Tor control connection unavailable: %s', e)
 
     return False
 
@@ -109,7 +115,8 @@ def gen_user_agent(config, is_mobile) -> str:
             return get_random_ua(ua_pool)
         except Exception as e:
             # If anything goes wrong, fall back to default Opera UA
-            print(f"Warning: Could not load UA pool, using fallback Opera UA: {e}")
+            logger.warning(
+                'Could not load UA pool, using fallback Opera UA: %s', e)
             return DEFAULT_FALLBACK_UA
 
     # Fallback for backwards compatibility (old configs or invalid user_agent values)
@@ -317,7 +324,7 @@ class Request:
                 return []
         except Exception as e:
             # Log the error but don't crash - autocomplete is non-essential
-            print(f"Autocomplete error: {str(e)}")
+            logger.warning('Autocomplete error: %s', e)
             return []
 
     def send(self, base_url='', query='', attempt=0,

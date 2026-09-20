@@ -1,8 +1,11 @@
 import json
 import httpx
+import logging
 import urllib.parse as urlparse
 import os
 import glob
+
+logger = logging.getLogger(__name__)
 
 bangs_dict = {}
 DDG_BANGS = 'https://duckduckgo.com/bang.js'
@@ -83,7 +86,7 @@ def gen_bangs_json(bangs_file: str) -> None:
 
     with open(bangs_file, 'w', encoding='utf-8') as f:
         json.dump(bangs_data, f)
-    print('* Finished creating ddg bangs json')
+    logger.info('Finished creating ddg bangs json')
     load_all_bangs(bangs_file, bangs_data)
 
 
